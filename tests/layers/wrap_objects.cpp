@@ -20,10 +20,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
+#include "vk_loader_platform.h"
 #include "vulkan/vk_layer.h"
-#include "vk_layer_table.h"
+#include "vk_dispatch_table_helper.h"
+#include "vk_layer_table.h"  //TODO remove
 
+#include "vk_layer_extension_utils.h"
+#include "vk_layer_utils.h"
 #include "wrap_objects.h"
+
+namespace wrap_objects {
+
+static const VkLayerProperties global_layer = {
+    "VK_LAYER_LUNARG_wrap_objects", VK_LAYER_API_VERSION, 1, "LunarG Test Layer",
+};
 
 //TODO Add wrapping of physicalDevice, device, queue, commandBuffer
 
@@ -42,11 +53,16 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreateInfo* pCre
         return result;
     }
     auto inst = new wrapped_inst_obj;
+    if (!inst)
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    memset(inst, 0, sizeof(*inst));
     inst->loader_disp = *(reinterpret_cast<VkLayerInstanceDispatchTable **> (*pInstance));
     //TODO inst->exts =
     inst->obj = reinterpret_cast<void *> (*pInstance);
     *pInstance = reinterpret_cast<VkInstance> (inst);
-    VkLayerInstanceDispatchTable *pTable = initInstanceTable(*pInstance, fpGetInstanceProcAddr);
+    VkLayerInstanceDispatchTable *pTable = initInstanceTable(*pInstance, fpGetInstanceProcAddr); // TODO remove
+    layer_init_instance_dispatch_table(*pInstance, &inst->layer_disp, fpGetInstanceProcAddr);
+
     create_instance_register_extensions(pCreateInfo, *pInstance);
 
     // store the loader callback for initializing created dispatchable objects
@@ -65,11 +81,11 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyInstance(VkInstance instance, const VkAlloca
 {
     wrapped_inst_obj *inst;
     auto vk_inst = unwrap_instance(instance, &inst);
-    dispatch_key key = get_dispatch_key(instance);
-    VkLayerInstanceDispatchTable *pDisp  =  instance_dispatch_table(instance);
+    VkLayerInstanceDispatchTable *pDisp  =  &inst->layer_disp;
     pDisp->DestroyInstance(vk_inst, pAllocator);
     instanceExtMap.erase(pDisp);
-    destroy_instance_dispatch_table(key);
+    if (inst->ptr_phys_devs)
+        delete[] inst->ptr_phys_devs;
     delete inst;
 }
 
@@ -77,43 +93,76 @@ VKAPI_ATTR VkResult VKAPI_CALL vkEnumeratePhysicalDevices(VkInstance instance, u
 {
     wrapped_inst_obj *inst;
     auto vk_inst = unwrap_instance(instance, &inst);
-    VkResult result = instance_dispatch_table(instance)->EnumeratePhysicalDevices(vk_inst, pPhysicalDeviceCount, pPhysicalDevices);
+    VkResult result = inst->layer_disp.EnumeratePhysicalDevices(vk_inst, pPhysicalDeviceCount, pPhysicalDevices);
+
+    if (VK_SUCCESS != result)
+        return result;
+
+    if (pPhysicalDevices != NULL) {
+        assert(pPhysicalDeviceCount);
+        auto phys_devs = new wrapped_phys_dev_obj[*pPhysicalDeviceCount];
+        if (!phys_devs)
+            return VK_ERROR_OUT_OF_HOST_MEMORY;
+        if (inst->ptr_phys_devs)
+            delete[] inst->ptr_phys_devs;
+        inst->ptr_phys_devs = phys_devs;
+        for (int i = 0; i < *pPhysicalDeviceCount; i++) {
+            phys_devs[i].loader_disp = *(reinterpret_cast<VkLayerInstanceDispatchTable **> (pPhysicalDevices[i]));
+            phys_devs[i].obj = reinterpret_cast<void *> (pPhysicalDevices[i]);
+            phys_devs[i].inst = inst;
+            pPhysicalDevices[i] = reinterpret_cast<VkPhysicalDevice> (&phys_devs[i]);
+        }
+    }
     return result;
 }
 
 VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFeatures(VkPhysicalDevice physicalDevice, VkPhysicalDeviceFeatures* pFeatures)
 {
-    instance_dispatch_table(physicalDevice)->GetPhysicalDeviceFeatures(physicalDevice, pFeatures);
+    wrapped_phys_dev_obj *phys_dev;
+    auto vk_phys_dev = unwrap_phys_dev(physicalDevice, &phys_dev);
+    phys_dev->inst->layer_disp.GetPhysicalDeviceFeatures(vk_phys_dev, pFeatures);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFormatProperties(VkPhysicalDevice physicalDevice, VkFormat format, VkFormatProperties* pFormatProperties)
 {
-    instance_dispatch_table(physicalDevice)->GetPhysicalDeviceFormatProperties(physicalDevice, format, pFormatProperties);
+    wrapped_phys_dev_obj *phys_dev;
+    auto vk_phys_dev = unwrap_phys_dev(physicalDevice, &phys_dev);
+    phys_dev->inst->layer_disp.GetPhysicalDeviceFormatProperties(vk_phys_dev, format, pFormatProperties);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceImageFormatProperties(VkPhysicalDevice physicalDevice, VkFormat format, VkImageType type, VkImageTiling tiling, VkImageUsageFlags usage, VkImageCreateFlags flags, VkImageFormatProperties* pImageFormatProperties)
 {
-    VkResult result = instance_dispatch_table(physicalDevice)->GetPhysicalDeviceImageFormatProperties(physicalDevice, format, type, tiling, usage, flags, pImageFormatProperties);
+    wrapped_phys_dev_obj *phys_dev;
+    auto vk_phys_dev = unwrap_phys_dev(physicalDevice, &phys_dev);
+    VkResult result = phys_dev->inst->layer_disp.GetPhysicalDeviceImageFormatProperties(vk_phys_dev, format, type, tiling, usage, flags, pImageFormatProperties);
     return result;
 }
 
 VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties* pProperties)
 {
-    instance_dispatch_table(physicalDevice)->GetPhysicalDeviceProperties(physicalDevice, pProperties);
+    wrapped_phys_dev_obj *phys_dev;
+    auto vk_phys_dev = unwrap_phys_dev(physicalDevice, &phys_dev);
+    phys_dev->inst->layer_disp.GetPhysicalDeviceProperties(vk_phys_dev, pProperties);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties(VkPhysicalDevice physicalDevice, uint32_t* pQueueFamilyPropertyCount, VkQueueFamilyProperties* pQueueFamilyProperties)
 {
-    instance_dispatch_table(physicalDevice)->GetPhysicalDeviceQueueFamilyProperties(physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties);
+    wrapped_phys_dev_obj *phys_dev;
+    auto vk_phys_dev = unwrap_phys_dev(physicalDevice, &phys_dev);
+    phys_dev->inst->layer_disp.GetPhysicalDeviceQueueFamilyProperties(vk_phys_dev, pQueueFamilyPropertyCount, pQueueFamilyProperties);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceMemoryProperties(VkPhysicalDevice physicalDevice, VkPhysicalDeviceMemoryProperties* pMemoryProperties)
 {
-    instance_dispatch_table(physicalDevice)->GetPhysicalDeviceMemoryProperties(physicalDevice, pMemoryProperties);
+    wrapped_phys_dev_obj *phys_dev;
+    auto vk_phys_dev = unwrap_phys_dev(physicalDevice, &phys_dev);
+    phys_dev->inst->layer_disp.GetPhysicalDeviceMemoryProperties(vk_phys_dev, pMemoryProperties);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDevice* pDevice)
 {
+    wrapped_phys_dev_obj *phys_dev;
+    auto vk_phys_dev = unwrap_phys_dev(physicalDevice, &phys_dev);
     VkLayerDeviceCreateInfo *chain_info = get_chain_info(pCreateInfo, VK_LAYER_LINK_INFO);
     PFN_vkGetInstanceProcAddr fpGetInstanceProcAddr = chain_info->u.pLayerInfo->pfnNextGetInstanceProcAddr;
     PFN_vkGetDeviceProcAddr fpGetDeviceProcAddr = chain_info->u.pLayerInfo->pfnNextGetDeviceProcAddr;
@@ -123,7 +172,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, c
     }
     // Advance the link info for the next element on the chain
     chain_info->u.pLayerInfo = chain_info->u.pLayerInfo->pNext;
-    VkResult result = fpCreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
+    VkResult result = fpCreateDevice(vk_phys_dev, pCreateInfo, pAllocator, pDevice);
     if (result != VK_SUCCESS) {
         return result;
     }
@@ -141,6 +190,17 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDevice(VkDevice device, const VkAllocationCa
     pDisp->DestroyDevice(device, pAllocator);
     deviceExtMap.erase(pDisp);
     destroy_device_dispatch_table(key);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(VkPhysicalDevice physicalDevice, const char* pLayerName, uint32_t* pPropertyCount, VkExtensionProperties* pProperties)
+{
+    wrapped_phys_dev_obj *phys_dev;
+    auto vk_phys_dev = unwrap_phys_dev(physicalDevice, &phys_dev);
+
+    if (pLayerName && !strcmp(pLayerName, global_layer.layerName))
+        return util_GetExtensionProperties(0, nullptr, pPropertyCount, pProperties);
+
+    return phys_dev->inst->layer_disp.EnumerateDeviceExtensionProperties(vk_phys_dev, pLayerName, pPropertyCount, pProperties);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkGetDeviceQueue(VkDevice device, uint32_t queueFamilyIndex, uint32_t queueIndex, VkQueue* pQueue)
@@ -248,7 +308,9 @@ VKAPI_ATTR void VKAPI_CALL vkGetImageSparseMemoryRequirements(VkDevice device, V
 
 VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceSparseImageFormatProperties(VkPhysicalDevice physicalDevice, VkFormat format, VkImageType type, VkSampleCountFlagBits samples, VkImageUsageFlags usage, VkImageTiling tiling, uint32_t* pPropertyCount, VkSparseImageFormatProperties* pProperties)
 {
-    instance_dispatch_table(physicalDevice)->GetPhysicalDeviceSparseImageFormatProperties(physicalDevice, format, type, samples, usage, tiling, pPropertyCount, pProperties);
+    wrapped_phys_dev_obj *phys_dev;
+    auto vk_phys_dev = unwrap_phys_dev(physicalDevice, &phys_dev);
+    phys_dev->inst->layer_disp.GetPhysicalDeviceSparseImageFormatProperties(vk_phys_dev, format, type, samples, usage, tiling, pPropertyCount, pProperties);
 }
 
 
@@ -882,32 +944,40 @@ VKAPI_ATTR void VKAPI_CALL vkDestroySurfaceKHR(VkInstance instance, VkSurfaceKHR
 {
     wrapped_inst_obj *inst;
     auto vk_inst = unwrap_instance(instance, &inst);
-    instance_dispatch_table(instance)->DestroySurfaceKHR(vk_inst, surface, pAllocator);
+    inst->layer_disp.DestroySurfaceKHR(vk_inst, surface, pAllocator);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceSupportKHR(VkPhysicalDevice physicalDevice, uint32_t queueFamilyIndex, VkSurfaceKHR surface, VkBool32* pSupported)
 {
-    VkResult result = instance_dispatch_table(physicalDevice)->GetPhysicalDeviceSurfaceSupportKHR(physicalDevice, queueFamilyIndex, surface, pSupported);
+    wrapped_phys_dev_obj *phys_dev;
+    auto vk_phys_dev = unwrap_phys_dev(physicalDevice, &phys_dev);
+    VkResult result = phys_dev->inst->layer_disp.GetPhysicalDeviceSurfaceSupportKHR(vk_phys_dev, queueFamilyIndex, surface, pSupported);
     return result;
 }
 
 
 VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(VkPhysicalDevice physicalDevice, VkSurfaceKHR surface, VkSurfaceCapabilitiesKHR* pSurfaceCapabilities)
 {
-    VkResult result = instance_dispatch_table(physicalDevice)->GetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, pSurfaceCapabilities);
+    wrapped_phys_dev_obj *phys_dev;
+    auto vk_phys_dev = unwrap_phys_dev(physicalDevice, &phys_dev);
+    VkResult result = phys_dev->inst->layer_disp.GetPhysicalDeviceSurfaceCapabilitiesKHR(vk_phys_dev, surface, pSurfaceCapabilities);
     return result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceFormatsKHR(VkPhysicalDevice physicalDevice, VkSurfaceKHR surface, uint32_t* pSurfaceFormatCount, VkSurfaceFormatKHR* pSurfaceFormats)
 {
-    VkResult result = instance_dispatch_table(physicalDevice)->GetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, pSurfaceFormatCount, pSurfaceFormats);
+    wrapped_phys_dev_obj *phys_dev;
+    auto vk_phys_dev = unwrap_phys_dev(physicalDevice, &phys_dev);
+    VkResult result = phys_dev->inst->layer_disp.GetPhysicalDeviceSurfaceFormatsKHR(vk_phys_dev, surface, pSurfaceFormatCount, pSurfaceFormats);
     return result;
 }
 
 
 VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfacePresentModesKHR(VkPhysicalDevice physicalDevice, VkSurfaceKHR surface, uint32_t* pPresentModeCount, VkPresentModeKHR* pPresentModes)
 {
-    VkResult result = instance_dispatch_table(physicalDevice)->GetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, pPresentModeCount, pPresentModes);
+    wrapped_phys_dev_obj *phys_dev;
+    auto vk_phys_dev = unwrap_phys_dev(physicalDevice, &phys_dev);
+    VkResult result = phys_dev->inst->layer_disp.GetPhysicalDeviceSurfacePresentModesKHR(vk_phys_dev, surface, pPresentModeCount, pPresentModes);
     return result;
 }
 
@@ -948,15 +1018,16 @@ vkCreateWin32SurfaceKHR(VkInstance instance, const VkWin32SurfaceCreateInfoKHR *
     VkResult result;
     wrapped_inst_obj *inst;
     auto vk_inst = unwrap_instance(instance, &inst);
-    result = instance_dispatch_table(instance)->CreateWin32SurfaceKHR(vk_inst, pCreateInfo, pAllocator, pSurface);
+    result = inst->layer_disp.CreateWin32SurfaceKHR(vk_inst, pCreateInfo, pAllocator, pSurface);
     return result;
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL
 vkGetPhysicalDeviceWin32PresentationSupportKHR(VkPhysicalDevice physicalDevice, uint32_t queueFamilyIndex) {
     VkBool32 result;
-
-    result = my_data->instance_dispatch_table->GetPhysicalDeviceWin32PresentationSupportKHR(physicalDevice, queueFamilyIndex);
+    wrapped_phys_dev_obj *phys_dev;
+    auto vk_phys_dev = unwrap_phys_dev(physicalDevice, &phys_dev);
+    result = phys_dev->inst->layer_disp.GetPhysicalDeviceWin32PresentationSupportKHR(vk_phys_dev, queueFamilyIndex);
     return result;
 }
 #endif // VK_USE_PLATFORM_WIN32_KHR
@@ -967,13 +1038,15 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateXcbSurfaceKHR(VkInstance instance, const 
 {
     wrapped_inst_obj *inst;
     auto vk_inst = unwrap_instance(instance, &inst);
-    VkResult result = instance_dispatch_table(instance)->CreateXcbSurfaceKHR(vk_inst, pCreateInfo, pAllocator, pSurface);
+    VkResult result = inst->layer_disp.CreateXcbSurfaceKHR(vk_inst, pCreateInfo, pAllocator, pSurface);
     return result;
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL vkGetPhysicalDeviceXcbPresentationSupportKHR(VkPhysicalDevice physicalDevice, uint32_t queueFamilyIndex, xcb_connection_t* connection, xcb_visualid_t visual_id)
 {
-    VkBool32 result = instance_dispatch_table(physicalDevice)->GetPhysicalDeviceXcbPresentationSupportKHR(physicalDevice, queueFamilyIndex, connection, visual_id);
+    wrapped_phys_dev_obj *phys_dev;
+    auto vk_phys_dev = unwrap_phys_dev(physicalDevice, &phys_dev);
+    VkBool32 result = phys_dev->inst->layer_disp.GetPhysicalDeviceXcbPresentationSupportKHR(vk_phys_dev, queueFamilyIndex, connection, visual_id);
     return result;
 }
 #endif  // VK_USE_PLATFORM_XCB_KHR
@@ -985,13 +1058,15 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateXlibSurfaceKHR(VkInstance instance, const
 {
     wrapped_inst_obj *inst;
     auto vk_inst = unwrap_instance(instance, &inst);
-    VkResult result = instance_dispatch_table(instance)->CreateXlibSurfaceKHR(vk_inst, pCreateInfo, pAllocator, pSurface);
+    VkResult result = inst->layer_disp.CreateXlibSurfaceKHR(vk_inst, pCreateInfo, pAllocator, pSurface);
     return result;
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL vkGetPhysicalDeviceXlibPresentationSupportKHR(VkPhysicalDevice physicalDevice, uint32_t queueFamilyIndex, Display* dpy, VisualID visualID)
 {
-    VkBool32 result = instance_dispatch_table(physicalDevice)->GetPhysicalDeviceXlibPresentationSupportKHR(physicalDevice, queueFamilyIndex, dpy, visualID);
+    wrapped_phys_dev_obj *phys_dev;
+    auto vk_phys_dev = unwrap_phys_dev(physicalDevice, &phys_dev);
+    VkBool32 result = phys_dev->inst->layer_disp.GetPhysicalDeviceXlibPresentationSupportKHR(vk_phys_dev, queueFamilyIndex, dpy, visualID);
     return result;
 }
 #endif  // VK_USE_PLATFORM_XLIB_KHR
@@ -1002,13 +1077,15 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateWaylandSurfaceKHR(VkInstance instance, co
 {
     wrapped_inst_obj *inst;
     auto vk_inst = unwrap_instance(instance, &inst);
-    VkResult result = instance_dispatch_table(instance)->CreateWaylandSurfaceKHR(vk_inst, pCreateInfo, pAllocator, pSurface);
+    VkResult result = inst->layer_disp.CreateWaylandSurfaceKHR(vk_inst, pCreateInfo, pAllocator, pSurface);
     return result;
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL vkGetPhysicalDeviceWaylandPresentationSupportKHR(VkPhysicalDevice physicalDevice, uint32_t queueFamilyIndex, struct wl_display* display)
 {
-    VkBool32 result = instance_dispatch_table(physicalDevice)->GetPhysicalDeviceWaylandPresentationSupportKHR(physicalDevice, queueFamilyIndex, display);
+    wrapped_phys_dev_obj *phys_dev;
+    auto vk_phys_dev = unwrap_phys_dev(physicalDevice, &phys_dev);
+    VkBool32 result = inst->layer_disp.GetPhysicalDeviceWaylandPresentationSupportKHR(vk_phys_dev, queueFamilyIndex, display);
     return result;
 }
 #endif  // VK_USE_PLATFORM_WAYLAND_KHR
@@ -1021,13 +1098,15 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateMirSurfaceKHR(VkInstance instance, const 
 {
     wrapped_inst_obj *inst;
     auto vk_inst = unwrap_instance(instance, &inst);
-    VkResult result = instance_dispatch_table(instance)->CreateMirSurfaceKHR(vk_inst, pCreateInfo, pAllocator, pSurface);
+    VkResult result = inst->layer_disp.CreateMirSurfaceKHR(vk_inst, pCreateInfo, pAllocator, pSurface);
     return result;
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL vkGetPhysicalDeviceMirPresentationSupportKHR(VkPhysicalDevice physicalDevice, uint32_t queueFamilyIndex, MirConnection* connection)
 {
-    VkBool32 result = instance_dispatch_table(physicalDevice)->GetPhysicalDeviceMirPresentationSupportKHR(physicalDevice, queueFamilyIndex, connection);
+    wrapped_phys_dev_obj *phys_dev;
+    auto vk_phys_dev = unwrap_phys_dev(physicalDevice, &phys_dev);
+    VkBool32 result = inst->layer_disp.GetPhysicalDeviceMirPresentationSupportKHR(vk_phys_dev, queueFamilyIndex, connection);
     return result;
 }
 #endif  // VK_USE_PLATFORM_MIR_KHR
@@ -1038,7 +1117,7 @@ vkCreateDebugReportCallbackEXT(VkInstance instance, const VkDebugReportCallbackC
     wrapped_inst_obj *inst;
     auto vk_inst = unwrap_instance(instance, &inst);
 
-    VkResult res = instance_dispatch_table(instance)->CreateDebugReportCallbackEXT(vk_inst, pCreateInfo, pAllocator, pMsgCallback);
+    VkResult res = inst->layer_disp.CreateDebugReportCallbackEXT(vk_inst, pCreateInfo, pAllocator, pMsgCallback);
     return res;
 }
 
@@ -1048,7 +1127,7 @@ vkDestroyDebugReportCallbackEXT(VkInstance instance,
                               const VkAllocationCallbacks *pAllocator) {
     wrapped_inst_obj *inst;
     auto vk_inst = unwrap_instance(instance, &inst);
-    instance_dispatch_table(instance)->DestroyDebugReportCallbackEXT(vk_inst, msgCallback, pAllocator);
+    inst->layer_disp.DestroyDebugReportCallbackEXT(vk_inst, msgCallback, pAllocator);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -1056,7 +1135,7 @@ vkDebugReportMessageEXT(VkInstance instance, VkDebugReportFlagsEXT flags, VkDebu
                       size_t location, int32_t msgCode, const char *pLayerPrefix, const char *pMsg) {
     wrapped_inst_obj *inst;
     auto vk_inst = unwrap_instance(instance, &inst);
-    instance_dispatch_table(instance)->DebugReportMessageEXT(vk_inst, flags, objType, object, location, msgCode, pLayerPrefix,
+    inst->layer_disp.DebugReportMessageEXT(vk_inst, flags, objType, object, location, msgCode, pLayerPrefix,
                                                             pMsg);
 }
 
@@ -1331,12 +1410,16 @@ static inline PFN_vkVoidFunction layer_intercept_proc(const char *name)
 
     return NULL;
 }
+
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* funcName);
 static inline PFN_vkVoidFunction layer_intercept_instance_proc(const char *name)
 {
     if (!name || name[0] != 'v' || name[1] != 'k')
         return NULL;
 
     name += 2;
+    if (!strcmp(name, "GetInstanceProcAddr"))
+        return (PFN_vkVoidFunction)vkGetInstanceProcAddr;
     if (!strcmp(name, "DestroyInstance"))
         return (PFN_vkVoidFunction) vkDestroyInstance;
     if (!strcmp(name, "EnumeratePhysicalDevices"))
@@ -1355,7 +1438,8 @@ static inline PFN_vkVoidFunction layer_intercept_instance_proc(const char *name)
         return (PFN_vkVoidFunction) vkGetPhysicalDeviceMemoryProperties;
     if (!strcmp(name, "GetPhysicalDeviceSparseImageFormatProperties"))
         return (PFN_vkVoidFunction) vkGetPhysicalDeviceSparseImageFormatProperties;
-
+    if (!strcmp(name, "EnumerateDeviceExtensionProperties"))
+        return (PFN_vkVoidFunction)vkEnumerateDeviceExtensionProperties;
     return NULL;
 }
 
@@ -1400,13 +1484,11 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, co
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* funcName)
 {
     PFN_vkVoidFunction addr;
-    if (!strcmp(funcName, "vkGetInstanceProcAddr"))
-        return (PFN_vkVoidFunction) vkGetInstanceProcAddr;
+   
     if (!strcmp(funcName, "vkCreateInstance"))
         return (PFN_vkVoidFunction) vkCreateInstance;
     if (!strcmp(funcName, "vkCreateDevice"))
         return (PFN_vkVoidFunction) vkCreateDevice;
-
 
     if (instance == VK_NULL_HANDLE) {
         return NULL;
@@ -1433,6 +1515,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instan
     //KHR_surface
     if (instanceExtMap.size() != 0 && instanceExtMap[pTable].wsi_surface_enabled)
     {
+        if (!strcmp("vkDestroySurfaceKHR", funcName))
+            return reinterpret_cast<PFN_vkVoidFunction>(vkDestroySurfaceKHR);
         if (!strcmp("vkGetPhysicalDeviceSurfaceSupportKHR", funcName))
             return reinterpret_cast<PFN_vkVoidFunction>(vkGetPhysicalDeviceSurfaceSupportKHR);
         if (!strcmp("vkGetPhysicalDeviceSurfaceCapabilitiesKHR", funcName))
@@ -1481,7 +1565,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instan
     }
 #endif // VK_USE_PLATFORM_WAYLAND_KHR
 #ifdef VK_USE_PLATFORM_WIN32_KHR
-    if (instanceExtMap.size() != 0 && instanceExtMap[pTable].wsi_surf_win32enabled)
+    if (instanceExtMap.size() != 0 && instanceExtMap[pTable].wsi_surf_win32_enabled)
     {
         if (!strcmp("vkCreateWin32SurfaceKHR", funcName))
             return reinterpret_cast<PFN_vkVoidFunction>(vkCreateWin32SurfaceKHR);
@@ -1495,3 +1579,34 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instan
     return pTable->GetInstanceProcAddr(instance, funcName);
 }
 
+} // namespace wrap_objects
+
+// loader-layer interface v0, just wrappers since there is only a layer
+
+VK_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL
+vkEnumerateInstanceExtensionProperties(const char *pLayerName, uint32_t *pCount, VkExtensionProperties *pProperties) {
+    assert(0); // TODO return wrap_objects::EnumerateInstanceExtensionProperties(pLayerName, pCount, pProperties);
+    return VK_SUCCESS;
+}
+
+VK_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL
+vkEnumerateInstanceLayerProperties(uint32_t *pCount, VkLayerProperties *pProperties) {
+    assert(0); // TODO return wrap_objects::EnumerateInstanceLayerProperties(pCount, pProperties);
+    return VK_SUCCESS;
+}
+
+VK_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL
+vkEnumerateDeviceLayerProperties(VkPhysicalDevice physicalDevice, uint32_t *pCount, VkLayerProperties *pProperties) {
+    // the layer command handles VK_NULL_HANDLE just fine internally
+    assert(physicalDevice == VK_NULL_HANDLE);
+    assert(0); // TODO return wrap_objects::EnumerateDeviceLayerProperties(VK_NULL_HANDLE, pCount, pProperties);
+    return VK_SUCCESS;
+}
+
+VK_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(VkPhysicalDevice physicalDevice,
+    const char *pLayerName, uint32_t *pCount,
+    VkExtensionProperties *pProperties) {
+    // the layer command handles VK_NULL_HANDLE just fine internally
+    assert(physicalDevice == VK_NULL_HANDLE);
+    return wrap_objects::vkEnumerateDeviceExtensionProperties(VK_NULL_HANDLE, pLayerName, pCount, pProperties);
+}

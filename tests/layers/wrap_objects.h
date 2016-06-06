@@ -40,11 +40,18 @@ struct instExts {
 static std::unordered_map<void *, struct devExts> deviceExtMap;
 static std::unordered_map<void *, struct instExts> instanceExtMap;
 
+struct wrapped_phys_dev_obj {
+    VkLayerInstanceDispatchTable *loader_disp;
+    struct wrapped_inst_obj *inst;  // parent instance object
+    void *obj;
+};
+
 struct wrapped_inst_obj {
     VkLayerInstanceDispatchTable *loader_disp;
     instExts exts;  //TODO use this
-    VkLayerInstanceDispatchTable *layer_disp;  // TODO use this
+    VkLayerInstanceDispatchTable layer_disp;    //this layer's dispatch table
     PFN_vkSetInstanceLoaderData pfn_inst_init;
+    struct wrapped_phys_dev_obj *ptr_phys_devs; // any enumerated phys devs
     void *obj;
 };
 
@@ -59,6 +66,11 @@ struct wrapped_dev_obj {
 static inline VkInstance unwrap_instance(const VkInstance instance,  wrapped_inst_obj **inst) {
    *inst = reinterpret_cast<wrapped_inst_obj *> (instance);
    return reinterpret_cast <VkInstance> ((*inst)->obj);
+}
+
+static inline VkPhysicalDevice unwrap_phys_dev(const VkPhysicalDevice physical_device,  wrapped_phys_dev_obj **phys_dev) {
+   *phys_dev = reinterpret_cast<wrapped_phys_dev_obj *> (physical_device);
+   return reinterpret_cast <VkPhysicalDevice> ((*phys_dev)->obj);
 }
 
 static void create_device_register_extensions(const VkDeviceCreateInfo *pCreateInfo, VkDevice device) {

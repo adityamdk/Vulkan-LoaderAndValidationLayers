@@ -52,6 +52,7 @@ endif()
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../../layers
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../loader
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/vulkan
     ${CMAKE_CURRENT_BINARY_DIR}/../../layers
 )
@@ -71,7 +72,11 @@ add_custom_command(OUTPUT vk_dispatch_table_helper.h
     COMMAND ${PYTHON_CMD} ${PROJECT_SOURCE_DIR}/vk-generate.py ${DisplayServer} dispatch-table-ops layer > vk_dispatch_table_helper.h
     DEPENDS ${PROJECT_SOURCE_DIR}/vk-generate.py ${PROJECT_SOURCE_DIR}/vulkan.py)
 
-
-add_vk_layer(wrap_objects wrap_objects.cpp  ${CMAKE_CURRENT_SOURCE_DIR}/../../layers/vk_layer_table.cpp)
+set (WRAP_SRCS
+       wrap_objects.cpp
+	   ${CMAKE_CURRENT_SOURCE_DIR}/../../layers/vk_layer_table.cpp
+	   ${CMAKE_CURRENT_SOURCE_DIR}/../../layers/vk_layer_extension_utils.cpp
+	   )
+add_vk_layer(wrap_objects ${WRAP_SRCS})
 
 
